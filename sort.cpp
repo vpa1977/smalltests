@@ -1,6 +1,7 @@
 #include <vector>
 #include "gtest/gtest.h"
-
+#include "radix_select.hpp"
+#include "merge_sort.hpp"
 #include "viennacl/context.hpp"
 #include "viennacl/ml/knn.hpp"
 
@@ -164,7 +165,7 @@ TEST(radix_sort, DISABLED_convert_kernel)
 	ctx->add_program(program_text, std::string("test"));
 
 	viennacl::vector<double> input(128, g_context);
-	viennacl::vector<uint64_t> output(128, g_context);
+	viennacl::vector<long> output(128, g_context);
 	for (int i = 0 ;i < 128; ++i)
 		input(i) = (double)1 / i;
 
@@ -178,8 +179,8 @@ TEST(radix_sort, DISABLED_convert_kernel)
 	{
 		double val = input(i);
 		int64_t * ptr = (int64_t*)&val;
-		uint64_t mask = uint64_t (-(*ptr >> 63) | 0x8000000000000000ull );
-		uint64_t result = *ptr ^ mask;
+		long mask = long (-(*ptr >> 63) | 0x8000000000000000ull );
+		long result = *ptr ^ mask;
 		ASSERT_EQ(result, output(i));
 	}
 
@@ -283,7 +284,7 @@ TEST(radix_sort, DISABLED_scan_kernel_test)
 	std::string program_text(&binary[0]);
 	ctx->add_program(program_text, std::string("test"));
 	int shift = 15;
-	std::vector<uint64_t> sample_data;
+	std::vector<long> sample_data;
 	for (int i = 0 ;i < 1000; i++)
 		sample_data.push_back(i);
 
@@ -292,7 +293,7 @@ TEST(radix_sort, DISABLED_scan_kernel_test)
 		int counts[16] = {};
 		for (int i = 0 ;i < 1000; i++)
 		{
-			uint64_t val = sample_data[i];
+			long val = sample_data[i];
 			val = (val >> (4 * shift) ) & 0xF;
 			counts[val]++;
 		}
@@ -313,8 +314,8 @@ TEST(radix_sort, DISABLED_scan_kernel_test)
 	scan_kernel.local_work_size(0,256);
 	scan_kernel.global_work_size(0,num_groups*256);
 
-	viennacl::vector<uint64_t> debug(N, g_context);
-	viennacl::vector<uint64_t> values(N, g_context);
+	viennacl::vector<long> debug(N, g_context);
+	viennacl::vector<long> values(N, g_context);
 	viennacl::vector<unsigned int> global_histogram( 16 * num_groups, g_context);
 	for (int i = 0 ; i < N ; i++)
 		values(i) = i;
@@ -336,9 +337,155 @@ TEST(radix_sort, DISABLED_scan_kernel_test)
 	}
 }
 
+template <typename T>
+static void print_vector(const viennacl::vector<T>&v)
+{
+	for (auto val : v)
+	{
+		std::cout << " " << val;
+	}
+	std::cout << std::endl;
+}
+
+template <typename T>
+static void print_vector_selected(const viennacl::vector<T>&v, const viennacl::vector<unsigned int>& selected)
+{
+	std::vector<T> test;
+	for (auto idx : selected)
+	{
+		test.push_back(v(idx));
+	}
+	std::stable_sort(test.begin(), test.end());
+	for (auto val : test)
+		std::cout << " " << val;
+	std::cout << std::endl;
+}
+
+// 1. add printf for select
+// 2. 
+TEST(radix_sort, DISABLED_real_sort)
+{
+	viennacl::ocl::current_context().cache_path("c:/tmp/");
+	int size = 1000;
+	viennacl::vector<double> selection(size, viennacl::ocl::current_context());
+	for (int i = 0; i < size; i++)
+		selection(i) = size - i;
+	print_vector(selection);
+	viennacl::vector<unsigned int> offsets = radix_select<double>(32, selection);
+	print_vector_selected(selection, offsets);
+	std::vector<unsigned int> result(offsets.size());
+	viennacl::copy(offsets, result);
+	ASSERT_EQ(offsets.size(), 32);
+	for (int i = 0; i < 32; ++i)
+	{
+		ASSERT_EQ(result[i], i+1);
+	}
+}
+
+TEST(merge_sort,DISABLED_real_sort)
+{
+	viennacl::ocl::current_context().cache_path("c:/tmp/");
+	int size = 256;
+	viennacl::vector<unsigned int> selection(size, viennacl::ocl::current_context());
+	viennacl::vector<unsigned int> orig_selection(size, viennacl::ocl::current_context());
+	for (int i = 0; i < size; i++)
+		orig_selection(i) = 512 - i;
+	viennacl::copy(orig_selection, selection);
+	std::cout << "-------------------" << std::endl;
+	print_vector(selection);
+	std::cout << "-------------------" << std::endl;
+	viennacl::vector<unsigned int> offsets = radix_select<unsigned int>(128,selection);
+	std::cout << "-------------------" << std::endl;
+	print_vector_selected(orig_selection, offsets);
+	std::cout << "-------------------" << std::endl;
+}
+
+TEST(radix_sort, benchmark_double_sort)
+{
+	typedef double test_type;
+	viennacl::ocl::current_context().cache_path("c:/tmp/");
+
+	int K = 128;
+	int power = 5;
+	int retry = 30;
+	std::fstream sort_benchmark("c:/master_in_progress/sort.txt");
+	for (power = 10; power < 30; ++power)
+	{
+		int size = pow(2, power);
+		
+		viennacl::vector<test_type> test_vector(size, viennacl::ocl::current_context());
+		std::vector<test_type> cpu_vector(size);
+		std::vector<test_type> cpu_vector_test(size);
+		for (int i = 0; i < cpu_vector.size(); ++i)
+		{
+			cpu_vector[i] = rand();
+		}
+		
+		if (power == 5) // warmup
+		{
+			merge_sort<test_type>(test_vector);
+			radix_select<test_type>(K, test_vector);
+			bitonic_sort<test_type>(test_vector);
+		}
+		system_clock::time_point t1, t2;
+
+		double merge_time = 0;
+		for (int i = 0; i < retry; ++i)
+		{
+			viennacl::copy(cpu_vector, test_vector);
+			t1 = system_clock::now();
+			merge_sort<test_type>(test_vector);
+			t2 = system_clock::now();
+			merge_time += duration_cast<duration<double>>(t2 - t1).count();
+		}
+		merge_time = merge_time / retry;
+
+		double radix_time = 0;
+		for (int i = 0; i < retry; ++i)
+		{
+			viennacl::copy(cpu_vector, test_vector);
+			t1 = system_clock::now();
+			radix_select<test_type>(K, test_vector);
+			t2 = system_clock::now();
+			radix_time += duration_cast<duration<double>>(t2 - t1).count();
+		}
+		
+		 radix_time = radix_time / retry;
+
+		
+		 double bitonic_time = 0;
+		for (int i = 0; i < retry; ++i)
+		{
+			viennacl::copy(cpu_vector, test_vector);
+			t1 = system_clock::now();
+			bitonic_sort<test_type>(test_vector);
+			t2 = system_clock::now();
+			bitonic_time += duration_cast<duration<double>>(t2 - t1).count();
+		}
+
+		
+		  bitonic_time =bitonic_time / retry;
+
+		
+		std::copy(cpu_vector.begin(),cpu_vector.end(), cpu_vector_test.begin());
+		t1 = system_clock::now();
+		std::sort(cpu_vector_test.begin(), cpu_vector_test.end());
+		t2 = system_clock::now();
+		double cpu_sort_time = duration_cast<duration<double>>(t2 - t1).count();
+
+		std::cout << power << "\t" << size << "\t" << cpu_sort_time <<"\t" << bitonic_time << "\t" << merge_time << "\t" << radix_time << std::endl;
+		sort_benchmark << power << "\t" << size << "\t" << bitonic_time << "\t" << merge_time << "\t" << radix_time << std::endl;
+		sort_benchmark.flush();
+	}
+	sort_benchmark.close();
+
+	
+	
+
+}
 
 
-TEST(radix_sort, simple_scatter_test)
+TEST(radix_sort, DISABLED_simple_scatter_test)
 {
 	FILE * tmp = fopen("convert.cl", "rb");
 	fseek(tmp,0,SEEK_END);
@@ -351,31 +498,75 @@ TEST(radix_sort, simple_scatter_test)
 	static viennacl::context g_context =   viennacl::ocl::current_context();
 	static bool init = false;
 	viennacl::ocl::context* ctx = g_context.opencl_pcontext();
+	std::cout << "Device " << ctx->current_device().name() << std::endl;
 	ctx->build_options("-cl-std=CL2.0 -D CL_VERSION_2_0");
 	std::string program_text(&binary[0]);
 	ctx->add_program(program_text, std::string("test"));
-	int shift = 15;
+	
 
 	viennacl::ocl::kernel scan_kernel = ctx->get_kernel("test", "scan_digits");
-	viennacl::ocl::kernel scatter_kernel = ctx->get_kernel("test", "scatter_digits");
+	viennacl::ocl::kernel create_scans_test = ctx->get_kernel("test", "create_scans_test");
 
-	int N = 1000;
-	int num_groups = 1;
+	int N = 1024;
+	int num_groups = 2;
+	int wg_size = 256;
 
-	scan_kernel.local_work_size(0,256);
-	scan_kernel.global_work_size(0,num_groups*256);
+	scan_kernel.local_work_size(0, wg_size);
+	scan_kernel.global_work_size(0, num_groups*wg_size);
 
-	scatter_kernel.local_work_size(0,256);
-	scatter_kernel.global_work_size(0,num_groups*256);
+	create_scans_test.local_work_size(0, wg_size);
+	create_scans_test.global_work_size(0, num_groups * wg_size);
 
-	viennacl::vector<uint64_t> debug(N, g_context);
-	viennacl::vector<uint64_t> values(N, g_context), scatter_values(N, g_context);
-	viennacl::vector<unsigned int> keys_in(N, g_context), keys_out(N,g_context);
-	std::vector<uint64_t> trace(N);
-	viennacl::vector<unsigned int> global_histogram( 16 * num_groups, g_context);
-	for (int i = 0 ; i < N ; i++)
-		values(i) = N-i;
-	for (int shift = 2; shift >= 0 ; shift --)
+	size_t sizeofLong = sizeof(long);
+	size_t sizoefDouble = sizeof(double);
+
+	viennacl::vector< int32_t > debug(N, g_context);
+	viennacl::vector< int32_t > values(N, g_context), scatter_values(N, g_context);
+	viennacl::vector< cl_uint > global_scans(N, g_context);
+	std::vector<int32_t>  global_scans_cpu(N);
+	viennacl::vector<unsigned int> global_histogram( (0xF+1) * num_groups, g_context);
+	viennacl::vector<unsigned int> global_histogram_prefix((0xF + 1) * num_groups+1, g_context);
+	std::vector<int32_t> global_histogram_prefix_cpu((0xF + 1) * num_groups + 1);
+	std::vector<int32_t> temp;
+	temp.resize(N);
+	for (int i = 0; i < N; i++)
+		temp[i] = i & 0xF;
+	viennacl::copy(temp, values);
+		
+	int shift = 0;
+
+	viennacl::ocl::enqueue(scan_kernel(values, 0, N, viennacl::ocl::local_mem(wg_size * sizeof(cl_uint)), shift, global_histogram));
+
+	ctx->get_queue().finish();
+
+	viennacl::linalg::exclusive_scan(global_histogram, global_histogram_prefix);
+	viennacl::copy(global_histogram_prefix, global_histogram_prefix_cpu);
+	//for (int i = 0; i < global_histogram.size(); ++i)
+	//	ASSERT_EQ(global_histogram(i), N / 0xF);
+
+	viennacl::ocl::enqueue(create_scans_test(
+		values, 
+		0, 
+		N, 
+		viennacl::ocl::local_mem( (0xF+1) * wg_size * sizeof(cl_uint)), 
+		shift,
+		0,
+		0xF, 
+		global_histogram_prefix,
+		global_scans));
+
+	viennacl::copy(global_scans, global_scans_cpu);
+
+	for (int i = 0; i < N; ++i)
+	{
+
+	}
+
+	ASSERT_TRUE(1);
+/*	viennacl::vector<unsigned int> keys_in(N, g_context), keys_out(N, g_context);
+	std::vector<long> trace(N);
+
+	for (int shift = 0; shift >= 0 ; shift --)
 	{
 		//__global double* in,  uint N, __local uint* reduce_buffer, uint shift, __global uint* global_histogram
 		viennacl::ocl::enqueue( scan_kernel(values,0, N,viennacl::ocl::local_mem(256* sizeof(cl_uint)), shift, global_histogram));
@@ -412,13 +603,13 @@ TEST(radix_sort, simple_scatter_test)
 		}
 		std::cout << std::endl;
 
-	}
+	}*/
 }
 
 
 
 
-void sample_select(viennacl::vector<uint64_t>& in, int K, viennacl::vector<uint64_t>& out)
+void sample_select(viennacl::vector<long>& in, int K, viennacl::vector<long>& out)
 {
 	std::vector<double> trace(1000);
 	static bool init = false;
@@ -465,7 +656,7 @@ void sample_select(viennacl::vector<uint64_t>& in, int K, viennacl::vector<uint6
 	scan_interval.start = 0;
 	scan_interval.end = in.size();
 
-	viennacl::vector<uint64_t> *scan_vector, * scatter_vector, * temp;
+	viennacl::vector<long> *scan_vector, * scatter_vector, * temp;
 	scan_vector = &in;
 	scatter_vector = &out;
 	int shift = 15;
@@ -579,7 +770,7 @@ TEST(select_test, DISABLED_do_select)
 	viennacl::ocl::context* ctx = g_context.opencl_pcontext();
 	ctx->build_options("-cl-std=CL2.0 -D CL_VERSION_2_0");
 
-	std::vector<uint64_t> sample_data;
+	std::vector<long> sample_data;
 	for (int i = 0 ;i < 1000; i++)
 		sample_data.push_back(i);
 
@@ -590,7 +781,7 @@ TEST(select_test, DISABLED_do_select)
 		int counts[16] = {};
 		for (int i = 0 ;i < 1000; i++)
 		{
-			uint64_t val = sample_data[i];
+			long val = sample_data[i];
 			val = (val >> (4 * shift) ) & 0xF;
 			counts[val]++;
 		}
@@ -601,7 +792,7 @@ TEST(select_test, DISABLED_do_select)
 
 		shift--;
 	}
-	viennacl::vector<uint64_t> sample_in(1000, g_context), sample_out(1000, g_context);
+	viennacl::vector<long> sample_in(1000, g_context), sample_out(1000, g_context);
 	viennacl::copy(sample_data, sample_in);
 	sample_select(sample_in,99, sample_out);
 
