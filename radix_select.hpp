@@ -115,13 +115,13 @@ std::string generate_kernel()
 		<< "" << std::endl
 		<< "int offset = 1;" << std::endl
 		<< "for (int l = length >> 1; l > 0; l >>= 1)" << std::endl
-		<< "{" << std::endl
-		<< "			barrier(CLK_LOCAL_MEM_FENCE);" << std::endl
-		<< "			if (localId < l)" << std::endl
-		<< "			{" << std::endl
-		<< "				int ai = offset*(2 * localId + 1) - 1;" << std::endl
-		<< "				int bi = offset*(2 * localId + 2) - 1;" << std::endl
-		<< "				block[bi] += block[ai];" << std::endl
+<< "{" << std::endl
+<< "			barrier(CLK_LOCAL_MEM_FENCE);" << std::endl
+<< "			if (localId < l)" << std::endl
+<< "			{" << std::endl
+<< "				int ai = offset*(2 * localId + 1) - 1;" << std::endl
+<< "				int bi = offset*(2 * localId + 2) - 1;" << std::endl
+<< "				block[bi] += block[ai];" << std::endl
 << "			}" << std::endl
 << "			offset <<= 1;" << std::endl
 << "		}" << std::endl
@@ -215,22 +215,26 @@ std::string generate_kernel()
 << "		__global uint* out_offsets, " << std::endl
 << "		__global VALUE_TYPE* out )" << std::endl
 << "	{" << std::endl
-
-<< "		for (int id = get_global_id(0); id < loopN; id += get_global_size(0))" << std::endl
+<< "        for (int id = get_global_id(0); id < start; id+= get_global_size(0))" << std::endl
+<< "		       {                                                            " << std::endl // clone original vector up to start
+<< "		          out[id] = in[id];                                            " << std::endl // clone original vector up to start
+<< "		          out_offsets[id] = in_offsets[id];                            " << std::endl // clone original vector up to start
+<< "		       }				                                            " << std::endl 
+<< "		for (int id = get_global_id(0); id < loopN; id += get_global_size(0))" << std::endl // rescatter rest
 << "		{" << std::endl
 << "			uint digit = select((uint)0xF, extract_char(in[id+start], MASK, MASK_SIZE * shift), id+start < N);" << std::endl
-<< "			create_scans(digit, start, N, reduce_buffer, shift, 0, 0xF);" << std::endl
-<< "//            bool scatter_cond = digit >=first_digit && digit <= last_digit; " << std::endl
-<< "			if (id+start < N)" << std::endl
+<< "			create_scans(digit, start, N, reduce_buffer, shift,first_digit, last_digit);" << std::endl
+<< "			if (id+start < N && digit <= last_digit )" << std::endl
 << "			{" << std::endl
 	<< "				uint scatter_pos = start +  global_histogram[digit * get_num_groups(0) + get_group_id(0)] + reduce_buffer[digit*get_local_size(0) + get_local_id(0)] - 1;" << std::endl
-	<< "				out_offsets[scatter_pos] =  in_offsets[id];" << std::endl
-	<< "				out[scatter_pos] = in[id];" << std::endl
+	<< "				out[scatter_pos] = in[id+start];" << std::endl
+	//<< "				out_offsets[id+start] = id+start;" << std::endl
+	<< "				out_offsets[scatter_pos] =  in_offsets[id+start];" << std::endl
 	<< "		}" << std::endl
 
 	<< "			if (get_local_id(0) == 0) // pad global histogram with reduce results" << std::endl
 	<< "			{" << std::endl
-	<< "				for (uint cur_digit = 0; cur_digit <= 0xF; ++cur_digit)" << std::endl
+	<< "				for (uint cur_digit = 0; cur_digit <= last_digit; ++cur_digit)" << std::endl
 	<< "				{" << std::endl
 	<< "					global_histogram[cur_digit * get_num_groups(0) + get_group_id(0)] += (reduce_buffer[(cur_digit + 1)* get_local_size(0) - 1] );" << std::endl
 	<< "				}" << std::endl
@@ -248,7 +252,7 @@ void _print_vector(const viennacl::vector<T>&v, int size)
 	std::cout << std::endl << "--------------------------------" << std::endl;
 	for (int i = 0 ;i < size; ++i)
 	{
-		std::cout << " " << v(i);
+		std::cout << " " << std::hex << v(i);
 	}
 	std::cout << std::endl << "--------------------------------" << std::endl;
 }
@@ -259,7 +263,7 @@ void _print_vector(const viennacl::vector<T>&v, int start, int end)
 	std::cout << std::endl << "--------------------------------" << std::endl;
 	for (int i = start; i < end; ++i)
 	{
-		std::cout << " " << v(i);
+		std::cout << " " << std::hex << v(i);
 	}
 	std::cout << std::endl << "--------------------------------" << std::endl;
 }
@@ -276,7 +280,7 @@ viennacl::vector<unsigned int> radix_select(int N, viennacl::vector<basic_type>&
 	viennacl::vector<basic_type> tmp(in.size(), viennacl::traits::context(in));
 	// load kernels
 	static bool init = false;
-	static int num_groups = 1;
+	static int num_gpu_groups;
 	static int wg_size = 128;
 	static int num_digits = 16;
 
@@ -288,9 +292,12 @@ viennacl::vector<unsigned int> radix_select(int N, viennacl::vector<basic_type>&
 		std::cout << "Device " << ctx.current_device().name() << std::endl;
 		ctx.build_options("-cl-std=CL2.0 -D CL_VERSION_2_0");
 		ctx.add_program(program_text, std::string("radix_select"));
+		num_gpu_groups = ctx.current_device().max_compute_units() * 4 + 1;
+		
 		init = true;
 	}
 
+	int num_groups = std::min(num_gpu_groups, (int) (in.size() / wg_size) + 1);
 	
 	viennacl::ocl::kernel scan_kernel = viennacl::ocl::current_context().get_kernel("radix_select", "scan_digits");
 	viennacl::ocl::kernel scatter_kernel = viennacl::ocl::current_context().get_kernel("radix_select", "scatter_digits");
@@ -320,6 +327,7 @@ viennacl::vector<unsigned int> radix_select(int N, viennacl::vector<basic_type>&
 	{
 		int main = ( (scan_end-scan_start) / wg_size) * wg_size; // floor to multiple wg size
 		int loop_end =  main == scan_end ? main : main + wg_size; // add wg size if needed
+		
 		viennacl::ocl::enqueue(scan_kernel(in,
 			src,
 			scan_start,
@@ -327,6 +335,7 @@ viennacl::vector<unsigned int> radix_select(int N, viennacl::vector<basic_type>&
 			viennacl::ocl::local_mem(sizeof(cl_uint) *wg_size), 
 			shift, 
 			global_histogram));
+
 		viennacl::linalg::exclusive_scan(global_histogram, global_histogram_prefix);
 		int digit = 1;
 		viennacl::copy(global_histogram_prefix, global_histogram_cpu);
@@ -341,6 +350,11 @@ viennacl::vector<unsigned int> radix_select(int N, viennacl::vector<basic_type>&
 		int hist_max = global_histogram_cpu[num_groups * digit];
 		int hist_min = global_histogram_cpu[num_groups * (digit - 1)];
 
+		if (hist_min == 0 && (digit < num_digits - 1 && hist_max == global_histogram_cpu[num_groups * (digit + 1)]))
+			continue;
+		
+		//viennacl::copy(in.begin(), in.begin() + scan_start, tmp.begin());
+		
 		viennacl::ocl::enqueue(scatter_kernel(
 			in,
 			src,
@@ -356,7 +370,13 @@ viennacl::vector<unsigned int> radix_select(int N, viennacl::vector<basic_type>&
 			tmp
 			));
 
-
+	/*	std::cout << "Result vector before:"  << scan_end << std::endl;
+		_print_vector(in, scan_end);
+		std::cout << "Result vector after:" << std::endl;
+		_print_vector(tmp, scan_end);
+		std::cout << "Scatter : " << std::endl;
+		_print_vector(dst, scan_end);
+   */
 		tmp.fast_swap(in);
 		dst.fast_swap(src);
 		

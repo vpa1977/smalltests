@@ -408,6 +408,7 @@ TEST(radix_sort, benchmark_double_sort)
 	int K = 128;
 	int power = 5;
 	int retry = 30;
+	int do_not_optimize = 0;
 	std::fstream sort_benchmark("c:/master_in_progress/sort.txt");
 	for (power = 10; power < 30; ++power)
 	{
@@ -434,8 +435,10 @@ TEST(radix_sort, benchmark_double_sort)
 		{
 			viennacl::copy(cpu_vector, test_vector);
 			t1 = system_clock::now();
-			merge_sort<test_type>(test_vector);
+			viennacl::vector<unsigned int> result = merge_sort<test_type>(test_vector);
+			int fix = result(0);
 			t2 = system_clock::now();
+			do_not_optimize += fix;
 			merge_time += duration_cast<duration<double>>(t2 - t1).count();
 		}
 		merge_time = merge_time / retry;
@@ -445,8 +448,10 @@ TEST(radix_sort, benchmark_double_sort)
 		{
 			viennacl::copy(cpu_vector, test_vector);
 			t1 = system_clock::now();
-			radix_select<test_type>(K, test_vector);
+			viennacl::vector<unsigned int> result = radix_select<test_type>(K, test_vector);
+			int fix = result(0);
 			t2 = system_clock::now();
+			do_not_optimize += fix;
 			radix_time += duration_cast<duration<double>>(t2 - t1).count();
 		}
 		
@@ -458,8 +463,10 @@ TEST(radix_sort, benchmark_double_sort)
 		{
 			viennacl::copy(cpu_vector, test_vector);
 			t1 = system_clock::now();
-			bitonic_sort<test_type>(test_vector);
+			viennacl::vector<unsigned int> result = bitonic_sort<test_type>(test_vector);
+			int fix = result(0);
 			t2 = system_clock::now();
+			do_not_optimize += fix;
 			bitonic_time += duration_cast<duration<double>>(t2 - t1).count();
 		}
 
@@ -477,6 +484,7 @@ TEST(radix_sort, benchmark_double_sort)
 		sort_benchmark << power << "\t" << size << "\t" << bitonic_time << "\t" << merge_time << "\t" << radix_time << std::endl;
 		sort_benchmark.flush();
 	}
+	std::cout << do_not_optimize << std::endl;
 	sort_benchmark.close();
 
 	
