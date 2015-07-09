@@ -380,190 +380,220 @@ return str.str();
 }
 
 template<typename basic_type>
-viennacl::vector<unsigned int> bitonic_sort(viennacl::vector<basic_type>& in)
+struct bitonic_sorter
 {
-	static bool init = false;
-	int orig_size = in.size();
-	int v = in.size();
-	// get next power of 2 
-	v--;
-	v |= v >> 1;
-	v |= v >> 2;
-	v |= v >> 4;
-	v |= v >> 8;
-	v |= v >> 16;
-	v++;
-	int length = v;
+	int length;
+	viennacl::vector<unsigned int> src;
+	viennacl::ocl::kernel kernel;
+	viennacl::ocl::kernel init_offsets_kernel;
 
-	viennacl::vector_range< viennacl::vector<basic_type> > fill_range(in, viennacl::range(in.size(), v));
-	viennacl::vector<unsigned int> src(length, viennacl::traits::context(in));
-	in.resize(length, true);
-	viennacl::linalg::vector_assign(fill_range, std::numeric_limits<basic_type>::max());
-
-	static int num_groups = 40;
-	static int wg_size = 256;
-	viennacl::context& the_context = viennacl::traits::context(in);
-	viennacl::ocl::context& ctx = const_cast<viennacl::ocl::context&>(the_context.opencl_context());
-	if (!init)
+	bitonic_sorter(int size, const viennacl::context& ctx)
 	{
-		std::string program_text = generate_bitonic_sort_kernel<basic_type>();
-		
-		std::cout << "Device " << ctx.current_device().name() << std::endl;
-		ctx.build_options("-cl-std=CL2.0 -D CL_VERSION_2_0");
-		ctx.add_program(program_text, std::string("bitonic_sort"));
-		init = true;
-	}
-
-	viennacl::ocl::kernel& kernel = ctx.get_kernel("bitonic_sort", "bitonicSort");
-	viennacl::ocl::kernel& init_offsets_kernel = ctx.get_kernel("bitonic_sort", "init_offsets");
-
-
-	int size = src.size();
-	viennacl::ocl::enqueue(init_offsets_kernel(size, src));
-
-	cl_uint numStages = 0;
-	cl_uint temp;
-
-	cl_uint stage;
-	cl_uint passOfStage;
-
-	kernel.local_work_size(0, wg_size);
-	kernel.global_work_size(0, std::max(v / 2, wg_size));
-
-	init_offsets_kernel.local_work_size(0, wg_size);
-	init_offsets_kernel.global_work_size(0, num_groups * wg_size);
-	/*
-	* This algorithm is run as NS stages. Each stage has NP passes.
-	* so the total number of times the kernel call is enqueued is NS * NP.
-	*
-	* For every stage S, we have S + 1 passes.
-	* eg: For stage S = 0, we have 1 pass.
-	*     For stage S = 1, we have 2 passes.
-	*
-	* if length is 2^N, then the number of stages (numStages) is N.
-	* Do keep in mind the fact that the algorithm only works for
-	* arrays whose size is a power of 2.
-	*
-	* here, numStages is N.
-	*
-	* For an explanation of how the algorithm works, please go through
-	* the documentation of this sample.
-	*/
-
-	/*
-	* 2^numStages should be equal to length.
-	* i.e the number of times you halve length to get 1 should be numStages
-	*/
-	for (temp = length; temp > 1; temp >>= 1)
-	{
-		++numStages;
-	}
-
-
-	for (stage = 0; stage < numStages; ++stage)
-	{
-		// Every stage has stage + 1 passes
-		for (passOfStage = 0; passOfStage < stage + 1; ++passOfStage)
+		int v = size;
+		// get next power of 2 
+		v--;
+		v |= v >> 1;
+		v |= v >> 2;
+		v |= v >> 4;
+		v |= v >> 8;
+		v |= v >> 16;
+		v++;
+		length = v;
+		src = viennacl::vector<unsigned int>(length, ctx);
+		static bool init = false;
+		viennacl::ocl::context& ocl_ctx = const_cast<viennacl::ocl::context&>(ctx.opencl_context());
+		if (!init)
 		{
-			viennacl::ocl::enqueue(kernel((cl_uint)in.size(), in, src, stage, passOfStage, 1));
+			std::string program_text = generate_bitonic_sort_kernel<basic_type>();
+			std::cout << "Device " << ocl_ctx.current_device().name() << std::endl;
+			ocl_ctx.build_options("-cl-std=CL2.0 -D CL_VERSION_2_0");
+			ocl_ctx.add_program(program_text, std::string("bitonic_sort"));
+			init = true;
 		}
+
+		kernel = ocl_ctx.get_kernel("bitonic_sort", "bitonicSort");
+		init_offsets_kernel = ocl_ctx.get_kernel("bitonic_sort", "init_offsets");
 	}
-	return src;
-}
+
+	viennacl::vector<unsigned int> bitonic_sort(viennacl::vector<basic_type>& in)
+	{
+
+		int orig_size = in.size();
+		viennacl::vector_range< viennacl::vector<basic_type> > fill_range(in, viennacl::range(in.size(), length));
+		in.resize(length, true);
+		viennacl::linalg::vector_assign(fill_range, std::numeric_limits<basic_type>::max());
+
+		static int num_groups = 40;
+		static int wg_size = 256;
+		viennacl::context& the_context = viennacl::traits::context(in);
+		viennacl::ocl::context& ctx = const_cast<viennacl::ocl::context&>(the_context.opencl_context());
+		int size = src.size();
+		viennacl::ocl::enqueue(init_offsets_kernel(size, src));
+
+		cl_uint numStages = 0;
+		cl_uint temp;
+
+		cl_uint stage;
+		cl_uint passOfStage;
+
+		kernel.local_work_size(0, wg_size);
+		kernel.global_work_size(0, std::max(length / 2, wg_size));
+
+		init_offsets_kernel.local_work_size(0, wg_size);
+		init_offsets_kernel.global_work_size(0, num_groups * wg_size);
+		/*
+		* This algorithm is run as NS stages. Each stage has NP passes.
+		* so the total number of times the kernel call is enqueued is NS * NP.
+		*
+		* For every stage S, we have S + 1 passes.
+		* eg: For stage S = 0, we have 1 pass.
+		*     For stage S = 1, we have 2 passes.
+		*
+		* if length is 2^N, then the number of stages (numStages) is N.
+		* Do keep in mind the fact that the algorithm only works for
+		* arrays whose size is a power of 2.
+		*
+		* here, numStages is N.
+		*
+		* For an explanation of how the algorithm works, please go through
+		* the documentation of this sample.
+		*/
+
+		/*
+		* 2^numStages should be equal to length.
+		* i.e the number of times you halve length to get 1 should be numStages
+		*/
+		for (temp = length; temp > 1; temp >>= 1)
+		{
+			++numStages;
+		}
+
+
+		for (stage = 0; stage < numStages; ++stage)
+		{
+			// Every stage has stage + 1 passes
+			for (passOfStage = 0; passOfStage < stage + 1; ++passOfStage)
+			{
+				viennacl::ocl::enqueue(kernel((cl_uint)in.size(), in, src, stage, passOfStage, 1));
+			}
+		}
+		return src;
+	}
+
+
+};
+
+
 
 /** 
 	sort provided vector and return offsets into original vector
 */
 template<typename basic_type>
-viennacl::vector<unsigned int> merge_sort(viennacl::vector<basic_type>& in)
+struct merge_sorter
 {
-	static bool init = false;
-	viennacl::vector<unsigned int> src(in.size(), viennacl::traits::context(in));
-	viennacl::vector<unsigned int> dst(in.size(), viennacl::traits::context(in));
+	viennacl::vector<unsigned int> src;
+	viennacl::vector<unsigned int> dst;
+	viennacl::ocl::kernel local_kernel;
+	viennacl::ocl::kernel global_kernel;
+	viennacl::ocl::kernel init_offsets_kernel;
+	int num_groups;
 
-	static int num_groups = 40;
-	static int wg_size = 256;
-	if (!init)
+	merge_sorter(int size, const viennacl::context& ctx)
 	{
-		std::string program_text = generate_merge_sort_kernel<basic_type>();
-		viennacl::context& the_context = viennacl::traits::context(in);
-		viennacl::ocl::context& ctx = const_cast<viennacl::ocl::context&>(the_context.opencl_context());
-		std::cout << "Device " << ctx.current_device().name() << std::endl;
-		ctx.build_options("-cl-std=CL2.0 -D CL_VERSION_2_0");
-		ctx.add_program(program_text, std::string("merge_sort"));
-		init = true;
+		src = viennacl::vector<unsigned int>(size, ctx);
+		dst = viennacl::vector<unsigned int>(size, ctx);
+		static bool init = false;
+		if (!init)
+		{
+			std::string program_text = generate_merge_sort_kernel<basic_type>();
+			
+			viennacl::ocl::context& ocl_ctx = const_cast<viennacl::ocl::context&>(ctx.opencl_context());
+			std::cout << "Device " << ocl_ctx.current_device().name() << std::endl;
+			ocl_ctx.build_options("-cl-std=CL2.0 -D CL_VERSION_2_0");
+			ocl_ctx.add_program(program_text, std::string("merge_sort"));
+			init = true;
+		}
+		local_kernel = viennacl::ocl::current_context().get_kernel("merge_sort", "local_merge");
+		global_kernel = viennacl::ocl::current_context().get_kernel("merge_sort", "global_merge");
+		init_offsets_kernel = viennacl::ocl::current_context().get_kernel("merge_sort", "init_offsets");
+		num_groups = ctx.opencl_context().current_device().max_compute_units() * 4 + 1;
 	}
 
-	viennacl::ocl::kernel& local_kernel = viennacl::ocl::current_context().get_kernel("merge_sort", "local_merge");
-	viennacl::ocl::kernel& global_kernel = viennacl::ocl::current_context().get_kernel("merge_sort", "global_merge");
-	viennacl::ocl::kernel& init_offsets_kernel = viennacl::ocl::current_context().get_kernel("merge_sort", "init_offsets");
 
-	
-	size_t localRange = wg_size;
-	size_t globalRange = in.size();
-	size_t modlocalRange = globalRange & (localRange - 1);
-	if (modlocalRange > 0) 
+	viennacl::vector<unsigned int> merge_sort(viennacl::vector<basic_type>& in)
 	{
-		globalRange &= ~modlocalRange;
-		globalRange += localRange;
-	}
-	
-	local_kernel.local_work_size(0, wg_size);
-	global_kernel.local_work_size(0, wg_size);
-	init_offsets_kernel.local_work_size(0, wg_size);
-	init_offsets_kernel.global_work_size(0, wg_size* num_groups);
+		
+		int wg_size = 128;
+		
 
-	local_kernel.global_work_size(0, globalRange);
-	global_kernel.global_work_size(0, globalRange);
+		size_t localRange = wg_size;
+		size_t globalRange = in.size();
+		size_t modlocalRange = globalRange & (localRange - 1);
+		if (modlocalRange > 0)
+		{
+			globalRange &= ~modlocalRange;
+			globalRange += localRange;
+		}
+
+		local_kernel.local_work_size(0, wg_size);
+		global_kernel.local_work_size(0, wg_size);
+		init_offsets_kernel.local_work_size(0, wg_size);
+		init_offsets_kernel.global_work_size(0, wg_size* num_groups);
+
+		local_kernel.global_work_size(0, globalRange);
+		global_kernel.global_work_size(0, globalRange);
 
 
-	cl_uint size = src.size();
-	viennacl::ocl::enqueue(init_offsets_kernel(size, src));
+		cl_uint size = src.size();
+		viennacl::ocl::enqueue(init_offsets_kernel(size, src));
 
-	viennacl::ocl::enqueue(local_kernel((cl_uint)in.size(), in, src, viennacl::ocl::local_mem(wg_size * sizeof(cl_double)), viennacl::ocl::local_mem(wg_size * sizeof(cl_double)),
-		viennacl::ocl::local_mem(wg_size * sizeof(cl_uint)), viennacl::ocl::local_mem(wg_size * sizeof(cl_uint))));
-	if (in.size() <= localRange)
+		viennacl::ocl::enqueue(local_kernel((cl_uint)in.size(), in, src, viennacl::ocl::local_mem(wg_size * sizeof(cl_double)), viennacl::ocl::local_mem(wg_size * sizeof(cl_double)),
+			viennacl::ocl::local_mem(wg_size * sizeof(cl_uint)), viennacl::ocl::local_mem(wg_size * sizeof(cl_uint))));
+		if (in.size() <= localRange)
+			return src;
+
+
+
+		viennacl::vector<basic_type> tmp(in.size(), viennacl::traits::context(in));
+
+		// An odd number of elements requires an extra merge pass to sort
+		int numMerges = 0;
+		// Calculate the log2 of vecSize, taking into account our block size
+		// from kernel 1 is 256
+		// this is how many merge passes we want
+		int log2BlockSize = in.size() >> 8;
+
+		for (; log2BlockSize > 1; log2BlockSize >>= 1) {
+			++numMerges;
+		}
+		// Check to see if the input vector size is a power of 2, if not we will
+		// need last merge pass
+		int vecPow2 = (in.size() & (in.size() - 1));
+		numMerges += in.size() > 0 ? 1 : 0;
+
+		for (int pass = 1; pass <= numMerges; ++pass) {
+			int srcLogicalBlockSize = localRange << (pass - 1);
+
+
+			if ((pass & 0x1) > 0) {
+				viennacl::ocl::enqueue(global_kernel((cl_uint)in.size(), (cl_uint)srcLogicalBlockSize, in, tmp, src, dst));
+			}
+			else {
+				viennacl::ocl::enqueue(global_kernel((cl_uint)in.size(), (cl_uint)srcLogicalBlockSize, tmp, in, dst, src));
+			}
+
+		}
+
+		if ((numMerges & 1) > 0)
+		{
+			tmp.fast_swap(in);
+			dst.fast_swap(src);
+		}
 		return src;
-
-	
-
-	viennacl::vector<basic_type> tmp(in.size(), viennacl::traits::context(in));
-
-	// An odd number of elements requires an extra merge pass to sort
-	int numMerges = 0;
-	// Calculate the log2 of vecSize, taking into account our block size
-	// from kernel 1 is 256
-	// this is how many merge passes we want
-	int log2BlockSize = in.size() >> 8;
-
-	for (; log2BlockSize > 1; log2BlockSize >>= 1) {
-		++numMerges;
-	}
-	// Check to see if the input vector size is a power of 2, if not we will
-	// need last merge pass
-	int vecPow2 = (in.size() & (in.size() - 1));
-	numMerges += in.size() > 0 ? 1 : 0;
-
-	for (int pass = 1; pass <= numMerges; ++pass) {
-		int srcLogicalBlockSize = localRange << (pass - 1);
-
-
-		if ((pass & 0x1) > 0) {
-			viennacl::ocl::enqueue(global_kernel((cl_uint)in.size(), (cl_uint)srcLogicalBlockSize, in, tmp, src, dst));
-		}
-		else {
-			viennacl::ocl::enqueue(global_kernel((cl_uint)in.size(), (cl_uint)srcLogicalBlockSize, tmp, in, dst, src));
-		}
-
 	}
 
-	if ((numMerges & 1) > 0)
-	{
-		tmp.fast_swap(in);
-		dst.fast_swap(src);
-	}
-	return src;
-}
+
+};
 
 
 

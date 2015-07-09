@@ -371,7 +371,7 @@ TEST(radix_sort, DISABLED_real_sort)
 	for (int i = 0; i < size; i++)
 		selection(i) = size - i;
 	print_vector(selection);
-	viennacl::vector<unsigned int> offsets = radix_select<double>(32, selection);
+	viennacl::vector<unsigned int> offsets = radix_select<double>(size, viennacl::ocl::current_context()).select(32, selection);
 	print_vector_selected(selection, offsets);
 	std::vector<unsigned int> result(offsets.size());
 	viennacl::copy(offsets, result);
@@ -382,25 +382,25 @@ TEST(radix_sort, DISABLED_real_sort)
 	}
 }
 
-TEST(merge_sort,DISABLED_real_sort)
+TEST(merge_sort, DISABLED_real_sort)
 {
 	viennacl::ocl::current_context().cache_path("c:/tmp/");
-	int size = 256;
+	int size = 4096;
 	viennacl::vector<unsigned int> selection(size, viennacl::ocl::current_context());
 	viennacl::vector<unsigned int> orig_selection(size, viennacl::ocl::current_context());
 	for (int i = 0; i < size; i++)
-		orig_selection(i) = 512 - i;
+		orig_selection(i) = rand();
 	viennacl::copy(orig_selection, selection);
 	std::cout << "-------------------" << std::endl;
 	print_vector(selection);
 	std::cout << "-------------------" << std::endl;
-	viennacl::vector<unsigned int> offsets = radix_select<unsigned int>(128,selection);
+	viennacl::vector<unsigned int> offsets = radix_select<unsigned int>(size, viennacl::ocl::current_context()).select(128, selection);
 	std::cout << "-------------------" << std::endl;
 	print_vector_selected(orig_selection, offsets);
 	std::cout << "-------------------" << std::endl;
 }
 
-TEST(radix_sort, benchmark_double_sort)
+TEST(radix_sort, DISABLED_benchmark_double_sort)
 {
 	typedef double test_type;
 	viennacl::ocl::current_context().cache_path("c:/tmp/");
@@ -421,64 +421,98 @@ TEST(radix_sort, benchmark_double_sort)
 		{
 			cpu_vector[i] = rand();
 		}
+
+		system_clock::time_point t0 = system_clock::now();
+		for (int i = 0; i < retry; ++i)
+			viennacl::copy(cpu_vector, test_vector);
+		system_clock::time_point t00 = system_clock::now();
+		double copy_duration = duration_cast<duration<double>>(t00 - t0).count() * 1000;
 		
-		if (power == 5) // warmup
+		merge_sorter<test_type> merge(size, viennacl::ocl::current_context());
+		radix_select<test_type>  radix(size, viennacl::ocl::current_context());
+		bitonic_sorter<test_type> bitonic(size, viennacl::ocl::current_context());
+		if (power == 10) // warmup
 		{
-			merge_sort<test_type>(test_vector);
-			radix_select<test_type>(K, test_vector);
-			bitonic_sort<test_type>(test_vector);
+			merge.merge_sort(test_vector);
+			radix.select(K, test_vector);
+			bitonic_sorter<test_type>(size, viennacl::ocl::current_context()).bitonic_sort(test_vector);
 		}
 		system_clock::time_point t1, t2;
 
 		double merge_time = 0;
+		t1 = system_clock::now();
 		for (int i = 0; i < retry; ++i)
 		{
 			viennacl::copy(cpu_vector, test_vector);
-			t1 = system_clock::now();
-			viennacl::vector<unsigned int> result = merge_sort<test_type>(test_vector);
+			viennacl::vector<unsigned int> result = merge.merge_sort(test_vector);
 			int fix = result(0);
-			t2 = system_clock::now();
 			do_not_optimize += fix;
-			merge_time += duration_cast<duration<double>>(t2 - t1).count();
 		}
+		t2 = system_clock::now();
+		merge_time = duration_cast<duration<double>>(t2 - t1).count() * 1000 - copy_duration;
 		merge_time = merge_time / retry;
+		
 
 		double radix_time = 0;
+		t1 = system_clock::now();
 		for (int i = 0; i < retry; ++i)
 		{
 			viennacl::copy(cpu_vector, test_vector);
-			t1 = system_clock::now();
-			viennacl::vector<unsigned int> result = radix_select<test_type>(K, test_vector);
+
+			viennacl::vector<unsigned int> result = radix.select(K, test_vector);
 			int fix = result(0);
-			t2 = system_clock::now();
+
 			do_not_optimize += fix;
-			radix_time += duration_cast<duration<double>>(t2 - t1).count();
+			
 		}
-		
+		t2 = system_clock::now();
+		radix_time += duration_cast<duration<double>>(t2 - t1).count() * 1000 - copy_duration;
 		 radix_time = radix_time / retry;
 
 		
-		 double bitonic_time = 0;
+		double bitonic_time = 0;
+		t1 = system_clock::now();
 		for (int i = 0; i < retry; ++i)
 		{
 			viennacl::copy(cpu_vector, test_vector);
-			t1 = system_clock::now();
-			viennacl::vector<unsigned int> result = bitonic_sort<test_type>(test_vector);
+			viennacl::vector<unsigned int> result = bitonic.bitonic_sort(test_vector);
 			int fix = result(0);
-			t2 = system_clock::now();
 			do_not_optimize += fix;
-			bitonic_time += duration_cast<duration<double>>(t2 - t1).count();
+			
 		}
+		t2 = system_clock::now();
+		bitonic_time = duration_cast<duration<double>>(t2 - t1).count() * 1000 - copy_duration;;
+
 
 		
 		  bitonic_time =bitonic_time / retry;
 
+		  double cpu_sort_time = 0;
 		
-		std::copy(cpu_vector.begin(),cpu_vector.end(), cpu_vector_test.begin());
-		t1 = system_clock::now();
-		std::sort(cpu_vector_test.begin(), cpu_vector_test.end());
-		t2 = system_clock::now();
-		double cpu_sort_time = duration_cast<duration<double>>(t2 - t1).count();
+		if (size > 262144)
+		{
+			std::copy(cpu_vector.begin(), cpu_vector.end(), cpu_vector_test.begin());
+			t1 = system_clock::now();
+			std::sort(cpu_vector_test.begin(), cpu_vector_test.end());
+			t2 = system_clock::now();
+			cpu_sort_time = duration_cast<duration<double>>(t2 - t1).count() * 1000;
+		}
+		else
+		{
+			system_clock::time_point t0 = system_clock::now();
+			for (int i = 0; i < retry; ++i)
+				std::copy(cpu_vector.begin(), cpu_vector.end(), cpu_vector_test.begin());
+			t1 = system_clock::now();
+			for (int i = 0; i < retry; ++i)
+			{
+				std::copy(cpu_vector.begin(), cpu_vector.end(), cpu_vector_test.begin());
+				std::sort(cpu_vector_test.begin(), cpu_vector_test.end());
+			}
+				
+			t2 = system_clock::now();
+			cpu_sort_time = duration_cast<duration<double>>( (t2 - t1) - (t1-t0)   ).count() * 1000/retry;
+		}
+		 
 
 		std::cout << power << "\t" << size << "\t" << cpu_sort_time <<"\t" << bitonic_time << "\t" << merge_time << "\t" << radix_time << std::endl;
 		sort_benchmark << power << "\t" << size << "\t" << bitonic_time << "\t" << merge_time << "\t" << radix_time << std::endl;
