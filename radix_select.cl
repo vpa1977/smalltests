@@ -70,6 +70,10 @@ inline uint extract_char(VALUE_TYPE val, uchar mask, uint shift)
 	return (val >> shift) & mask;
 }
 
+
+
+
+
 inline void create_scans(uint digit, 	
 							uint start,  
 							uint N,  
