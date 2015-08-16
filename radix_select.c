@@ -1,12 +1,12 @@
 #define MASK 0xF
 #define MASK_SIZE 4
-#define VALUE_TYPE double
+#define VALUE_TYPE int
 inline uint extract_char(VALUE_TYPE val, uchar mask, uint shift)
 {
-	long test = as_long(val);
-	long res = test ^ (-(test >> 63) | 0x8000000000000000);
-	return (res >> shift) & mask;
-	//return (val >> shift) & mask;
+//	long test = as_long(val);
+//	long res = test ^ (-(test >> 63) | 0x8000000000000000);
+//	return (res >> shift) & mask;
+	return (val >> shift) & mask;
 }
 
 
@@ -135,9 +135,8 @@ __kernel void scan_digits_start(
 
 }
 
-
-
-__kernel void scan_2(__local uint* shared_buffer, __global uint* carries) {
+__kernel void scan_2( __global uint* carries) {
+	__local uint shared_buffer[256];
 	uint my_carry = carries[get_local_id(0)];
 	for (unsigned int stride = 1; stride < get_local_size(0); stride *= 2) {
 		barrier(CLK_LOCAL_MEM_FENCE);
@@ -203,12 +202,7 @@ __kernel void scan_1(__global uint* X,
 		block_offset += shared_buffer[get_local_size(0) - 1];
 	}
 	if (get_local_id(0) == 0) carries[get_group_id(0)] = block_offset;
-	barrier(CLK_GLOBAL_MEM_FENCE);
-	if (get_group_id(0) == 0)
-	{
-		scan_2(shared_buffer, carries);
-	}
-
+		
 }
 
 
@@ -312,34 +306,31 @@ __kernel void scatter_digits(
 	uint loop_end = select((uint)(main + get_local_size(0)), (uint)main, main == end);
 
 	__local uint prefix[0x10];
-	__local uint prefix_next[0x10];
+//	__local uint prefix_next[0x10];
 	if (lid < 0x10)
 	{
 		prefix[lid] = global_histogram_prefix[lid * get_num_groups(0) + get_group_id(0)];
-		prefix_next[lid] = global_histogram_prefix[lid * get_num_groups(0) + get_group_id(0) + 1];
+//		prefix_next[lid] = global_histogram_prefix[lid * get_num_groups(0) + get_group_id(0) + 1];
 	}
 	barrier(CLK_LOCAL_MEM_FENCE);
-	uint step_loop = 0;
+	
 	// loop should be aligned to the workgroup size
-	for (int id = get_global_id(0); id < loop_end; id += get_global_size(0), step_loop +=1)
+	for (int id = get_global_id(0); id < loop_end; id += get_global_size(0))
 	{
 		// build scans for current workgroup/iteration
 		uint cur_digit = select((uint)0xF, extract_char(in[id], MASK, MASK_SIZE * shift), id  < end);
 		for (uint digit = 0; digit <= 0xF; ++digit)
-			reduce_buffer[lid + get_local_size(0)*digit] = 0xFF;
-			
+			reduce_buffer[lid + get_local_size(0)*digit] = select(0, 1, digit == cur_digit); // reset scans
+		barrier(CLK_LOCAL_MEM_FENCE);
 		for (uint digit =  ctx->min_digit; digit <= ctx->max_digit; ++digit)
 		{
 			//if (prefix[digit] != prefix_next[digit])
 			{
-				reduce_buffer[lid + get_local_size(0)*digit] = select(0, 1, digit == cur_digit); // reset scans
-				barrier(CLK_LOCAL_MEM_FENCE);
 				workgroup_scan(&reduce_buffer[get_local_size(0)*digit]);
-				barrier(CLK_LOCAL_MEM_FENCE);
 			}
 		}
 		barrier(CLK_LOCAL_MEM_FENCE);
-		if (id  < end && reduce_buffer[get_local_size(0) *cur_digit + lid] < 0xFF)
+		if (id  < end && cur_digit >= ctx->min_digit && cur_digit <= ctx->max_digit)
 		{
 			uint scatter_pos = prefix[cur_digit] + reduce_buffer[get_local_size(0) *cur_digit + lid] - 1;
 			out[scatter_pos ] =  in[id];
@@ -353,43 +344,70 @@ __kernel void scatter_digits(
 	
 	if (get_global_id(0) == 0 )
 	{
-		clk_event_t evt_scan_ready;
+	
 		ndrange_t scan_range = ndrange_1D(get_global_size(0), get_local_size(0));
-		enqueue_kernel(get_default_queue(),
-			CLK_ENQUEUE_FLAGS_WAIT_KERNEL,
-			scan_range,
-			0, NULL, &evt_scan_ready,
-			^{ for (int id = get_global_id(0); id < end; id += get_global_size(0)) {
-				in[id] = out[id];
-				in_offsets[id] = out_offsets[id];
-			   } 
-			 }
-		);
 
 		if (shift > 0 && ctx->hist_max > N)
 		{
-			N = N - (ctx->hist_min);
-			uint start = ctx->hist_min;
-			end = min(end, ctx->hist_max);
-			end = end - start;
-			//	ctx->debug_n = N;
-			//	ctx->debug_start = start;
-			//	ctx->debug_end = end;
-			//	ctx->shift = shift - 1;
-			ndrange_t scan_range = ndrange_1D(get_global_size(0), get_local_size(0));
-			/*enqueue_kernel(get_default_queue(),
-			CLK_ENQUEUE_FLAGS_WAIT_KERNEL,
-			scan_range,
-			^{ scan_with_offset(in, in_offsets, out, out_offsets,   global_histogram_prefix, carries, context); }
-			);*/
+			int last_value = end;
+/*			clk_event_t evt_data_copied;
 			enqueue_kernel(get_default_queue(),
-				CLK_ENQUEUE_FLAGS_NO_WAIT,
+				CLK_ENQUEUE_FLAGS_WAIT_KERNEL,
 				scan_range,
-				1, &evt_scan_ready, NULL,
-				^{ scan_digits(N, in + start, in_offsets + start, out, out_offsets,  end, shift - 1,  global_histogram_prefix,carries, context); }
+				0, NULL, &evt_data_copied,
+				^{ for (int idx = get_global_id(0); idx < last_value; idx += get_global_size(0)) {
+				in[idx] = out[idx];
+				in_offsets[idx] = out_offsets[idx];
+			}
+			}
+			);
+			*/
+			int newN = N - (ctx->hist_min);
+			uint start = ctx->hist_min;
+			uint new_end = min(end, ctx->hist_max);
+			new_end = new_end - start;
+			__global VALUE_TYPE* new_in = in + start;
+			__global uint* new_offsets = in_offsets + start;
+			ctx->debug_n = newN;
+			ctx->debug_start = start;
+			ctx->debug_end = new_end;
+			ctx->shift = shift - 1;
+			/*barrier(CLK_GLOBAL_MEM_FENCE);
+			enqueue_kernel(get_default_queue(),
+				CLK_ENQUEUE_FLAGS_WAIT_KERNEL,
+				scan_range,
+				^{ scan_with_offset(in, in_offsets, out, out_offsets,   global_histogram_prefix, carries, context); }
+			);*/
+			
+			enqueue_kernel(get_default_queue(),
+				CLK_ENQUEUE_FLAGS_WAIT_KERNEL,
+				scan_range,
+				//1, &evt_data_copied, NULL,
+				^{ 
+					for (int idx = get_global_id(0); idx < last_value; idx += get_global_size(0)) {
+						in[idx] = out[idx];
+						in_offsets[idx] = out_offsets[idx];
+					}
+					barrier(CLK_GLOBAL_MEM_FENCE); // commit current workgroup
+					scan_digits(newN, new_in, new_offsets, out, out_offsets,  new_end, shift - 1,  global_histogram_prefix,carries, context); 
+			
+				}
+			);
+			//release_event(evt_data_copied);
+		}
+		else
+		{
+			enqueue_kernel(get_default_queue(),
+				CLK_ENQUEUE_FLAGS_WAIT_KERNEL,
+				scan_range,
+				^{ for (int idx = get_global_id(0); idx < end; idx += get_global_size(0)) {
+				in[idx] = out[idx];
+				in_offsets[idx] = out_offsets[idx];
+			}
+			}
 			);
 		}
-		release_event(evt_scan_ready);
+		
 
 	}
 }
@@ -410,7 +428,6 @@ __kernel void scan_digits(
 {
 	//if (get_global_id(0) == 0) context[10 + shift] = 1;
 	struct scatter_context* ctx = (struct scatter_context*)context;
-	if (get_global_id(0) == 0) ctx->debug_shift = shift;
 	__local uint reduce_buffer[WG_SIZE];
 	int lid = get_local_id(0);
 	uint digit_counts[MASK + 1] = {};// local buffer for the scanned characters
@@ -425,16 +442,18 @@ __kernel void scan_digits(
 		reduce_buffer[lid] = digit_counts[digit];
 		barrier(CLK_LOCAL_MEM_FENCE);
 		workgroup_reduce(reduce_buffer);
+		barrier(CLK_LOCAL_MEM_FENCE);
 		if (lid == 0)
 			global_histogram_prefix[get_group_id(0) + digit * get_num_groups(0)] = reduce_buffer[0];
 	}
 	if (get_global_id(0) == 0)
 	{
 		int histogram_size = get_num_groups(0) *0x10;
-		clk_event_t evt_histogram_ready, evt_scan_ready;
+		clk_event_t evt_histogram_ready, evt_scan_ready, evt_carry_ready;
 		ndrange_t sum_range = ndrange_1D(SCAN_GLOBAL_SIZE, SCAN_WG_SIZE);
 		ndrange_t scatter_range = ndrange_1D(get_global_size(0), get_local_size(0));
-		ndrange_t limits_range = ndrange_1D(16, 16);
+		ndrange_t carries_range = ndrange_1D(SCAN_WG_SIZE, SCAN_WG_SIZE);
+		ndrange_t limits_range = ndrange_1D(0x10, 0x10);
 		uint parent_global_size = get_global_size(0);
 		uint parent_local_size = get_local_size(0);
 		enqueue_kernel(get_default_queue(),
@@ -446,8 +465,15 @@ __kernel void scan_digits(
 
 		enqueue_kernel(get_default_queue(),
 			CLK_ENQUEUE_FLAGS_NO_WAIT,
+			carries_range,
+			1, &evt_scan_ready, &evt_carry_ready,
+			^{ scan_2(carries); }
+		);
+
+		enqueue_kernel(get_default_queue(),
+			CLK_ENQUEUE_FLAGS_NO_WAIT,
 			sum_range,
-			1, &evt_scan_ready, &evt_histogram_ready,
+			1, &evt_carry_ready, &evt_histogram_ready,
 			^{scan_3(global_histogram_prefix, 0, 1, histogram_size+1, carries); }
 		);
 		
@@ -459,6 +485,7 @@ __kernel void scan_digits(
 		);
 
 		release_event(evt_scan_ready);
+		release_event(evt_carry_ready);
 		release_event(evt_histogram_ready);
 	}
 

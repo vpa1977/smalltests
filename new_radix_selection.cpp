@@ -525,7 +525,7 @@ static void print_vector_selected(const viennacl::vector<T>&v, const viennacl::v
 }
 
 
-TEST(radix_sort, DISABLED_third_stage)
+TEST(radix_sort, _third_stage)
 {
 	using namespace magic_hamster;
 	clearme();
@@ -533,7 +533,7 @@ TEST(radix_sort, DISABLED_third_stage)
 	viennacl::ocl::current_context().cache_path("c:/tmp/");
 	static bool init = false;
 	static int num_gpu_groups;
-	static int wg_size = 16;
+	static int wg_size = 4;
 	static int num_digits = 16;
 
 	viennacl::backend::mem_handle opencl_carries;
@@ -583,12 +583,12 @@ TEST(radix_sort, DISABLED_third_stage)
 	int count = 16 * max_num_digits;
 	for (int i = 0; i < max_num_digits; i++)
 		for (int j = 0; j < 16; ++j)
-			input(i * 16 + j) =j*0xF + i;
+			input(i * 16 + j) = j *0xF + i;
 	std::vector<int> test(input.size());
 	viennacl::copy(input, test);
 
 	int shift = sizeof(int) * 2 - 1;
-	
+	shift = 1;
 
 	int start = 0;
 	int end = input.size();
@@ -608,7 +608,20 @@ TEST(radix_sort, DISABLED_third_stage)
 			scan_context
 			)
 			);
+		
+		/*viennacl::ocl::enqueue(
+			scan_with_offset(input,
+				src,
+				output,
+				dst,
+				global_histogram_prefix,
+				global_histogram_carries,
+				scan_context)
+		);*/
+	
 
+		std::vector<int> raw(input.size());
+		viennacl::copy(input, raw);
 //	print_vector_std(test, "lol_selection", false);
 		std::sort(test.begin(), test.end());
 		test.resize(N);
@@ -618,7 +631,7 @@ TEST(radix_sort, DISABLED_third_stage)
 		
 		print_vector(input, "raw_input", false);
 		print_vector(dst, "out_offset", false);
-		print_vector(scan_context, "ctx", false);
+		print_vector(scan_context, "ctx");
 		viennacl::copy(input.begin(), input.begin() + N, test.begin());
 		std::sort(test.begin(), test.end());
 		print_vector_std(test, "input_after", false);

@@ -364,32 +364,72 @@ static void print_vector_selected(const viennacl::vector<T>&v, const viennacl::v
 
 TEST(radix_sort, DISABLED_stage3_double_sort)
 {
-	viennacl::ocl::current_context().cache_path("c:/tmp/");
-	viennacl::ocl::current_context().add_device_queue(viennacl::ocl::current_context().current_device().id());
-	int K = 128;
-	int size = 8192;
-	std::vector<double> test(size);
-	for (int i = 0; i< size; i++)
-		test[i] = size - i;
+	//for (; ; )
+	{
+		std::ifstream fis("failed.txt", std::ifstream::in);
+		double val;
+		std::vector<double> test;
+		while (!fis.eof())
+		{
+			fis >> val;
+			test.push_back(val);
+		}
 
-	viennacl::vector<double> gpu_vec(size, viennacl::ocl::current_context());
-	viennacl::copy(test.begin(), test.end(), gpu_vec.begin());
-	radix_select_device<double> radix_device(size, viennacl::ocl::current_context());
-	viennacl::vector<unsigned int> select = radix_device.select(K, gpu_vec);
-	gpu_vec.resize(K, true);
-	print_vector(gpu_vec);
-	gpu_vec.resize(size);
-	viennacl::copy(test.begin(), test.end(), gpu_vec.begin());
-	select.resize(K, true);
-	print_vector_selected(gpu_vec, select);
 
-	printf("");
+		viennacl::ocl::current_context().cache_path("c:/tmp/");
+		viennacl::ocl::current_context().add_device_queue(viennacl::ocl::current_context().current_device().id());
+		int K = 128;
+		int size = test.size();
 
+		viennacl::vector<double> gpu_vec(size, viennacl::ocl::current_context());
+		viennacl::copy(test.begin(), test.end(), gpu_vec.begin());
+		radix_select_device<double> radix_device(size, viennacl::ocl::current_context());
+		viennacl::vector<unsigned int> select = radix_device.select(K, gpu_vec);
+		gpu_vec.resize(K, true);
+		print_vector(gpu_vec);
+		gpu_vec.resize(size);
+		std::vector<double> value_sort(K), value_from_select(K);
+		viennacl::copy(gpu_vec.begin(), gpu_vec.begin() + K, value_sort.begin());
+		std::sort(value_sort.begin(), value_sort.end());
+
+
+
+
+		viennacl::copy(test.begin(), test.end(), gpu_vec.begin());
+		select.resize(K, true);
+		//	print_vector_selected(gpu_vec, select);
+		for (int i = 0; i < K; ++i)
+			value_from_select[i] = gpu_vec(select(i));
+
+		std::sort(test.begin(), test.end());
+	//	std::sort(value_from_select.begin(), value_from_select.end());
+
+		try {
+			for (int i = 0; i < K; ++i)
+				if (test.at(i) != value_sort.at(i))
+				{
+					print_vector(radix_device.scan_context);
+					print_vector(radix_device.tmp);
+					printf("");
+				}
+			for (int i = 0; i < K; ++i)
+				ASSERT_EQ(test.at(i), value_from_select.at(i));
+
+		}
+		catch (...)
+		{
+			printf("");
+		}
+
+
+		printf("ok");
+	
+	}
 
 }
 
 
-TEST(radix_sort, benchmark_double_sort)
+TEST(radix_sort,  DISABLED_benchmark_double_sort)
 {
 	typedef double test_type;
 	viennacl::ocl::current_context().cache_path("c:/tmp/");
