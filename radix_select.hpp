@@ -294,16 +294,16 @@ namespace ns_radix_select
 }
 
 /*
-	Select N smallest values from basic_type vector
-	*/
+Select N smallest values from basic_type vector
+*/
 template<typename basic_type>
 struct radix_select
 {
 	viennacl::vector<unsigned int> src;
 	viennacl::vector<unsigned int> dst;
 	viennacl::vector<basic_type> tmp;
-	viennacl::vector<unsigned int> global_histogram; 
-	viennacl::vector<unsigned int> global_histogram_prefix; 
+	viennacl::vector<unsigned int> global_histogram;
+	viennacl::vector<unsigned int> global_histogram_prefix;
 
 	viennacl::ocl::kernel scan_kernel;
 	viennacl::ocl::kernel scatter_kernel;
@@ -320,7 +320,7 @@ struct radix_select
 		if (!init)
 		{
 			std::string program_text = generate_kernel<basic_type>();
-			
+
 			viennacl::ocl::context& ocl_ctx = const_cast<viennacl::ocl::context&>(ctx.opencl_context());
 			std::cout << "Device " << ocl_ctx.current_device().name() << std::endl;
 			ocl_ctx.build_options("-cl-std=CL2.0 -D CL_VERSION_2_0");
@@ -330,10 +330,10 @@ struct radix_select
 		}
 		num_groups = std::min(num_gpu_groups, (int)(size / wg_size) + 1);
 
-		src = viennacl::vector<unsigned int>(size,ctx);
+		src = viennacl::vector<unsigned int>(size, ctx);
 		dst = viennacl::vector<unsigned int>(size, ctx);
 		tmp = viennacl::vector<basic_type>(size, ctx);
-		global_histogram = viennacl::vector<unsigned int>((0xF + 1) * num_groups,ctx);
+		global_histogram = viennacl::vector<unsigned int>((0xF + 1) * num_groups, ctx);
 		global_histogram_prefix = viennacl::vector<unsigned int>((0xF + 1) * num_groups + 1, ctx);
 
 
@@ -342,7 +342,7 @@ struct radix_select
 		init_offsets_kernel = viennacl::ocl::current_context().get_kernel("radix_select", "init_offsets");
 
 
-		
+
 
 
 		scan_kernel.local_work_size(0, wg_size);
@@ -359,11 +359,11 @@ struct radix_select
 	viennacl::vector<unsigned int> select(int N, viennacl::vector<basic_type>& in)
 	{
 		int selectN = N;
-		
-		
+
+
 		static int wg_size = 128;
 		static int num_digits = 16;
-		
+
 		cl_uint size = src.size();
 		viennacl::ocl::enqueue(init_offsets_kernel(size, src));
 		viennacl::vector<unsigned int> scan_range(4, viennacl::traits::context(in));
@@ -408,12 +408,112 @@ struct radix_select
 			*/
 			tmp.fast_swap(in);
 			dst.fast_swap(src);
-		//	if (scan_range(2) == 0)
-		//		break;
+			//	if (scan_range(2) == 0)
+			//		break;
 		}
 		//src.resize(selectN, true);
 		return src;
 	}
 };
+
+
+template<typename basic_type>
+struct radix_select_device
+{
+	viennacl::vector<unsigned int> src;
+	viennacl::vector<unsigned int> dst;
+	viennacl::vector<basic_type> tmp;
+	viennacl::vector<unsigned int> global_histogram;
+	viennacl::vector<unsigned int> global_histogram_prefix;
+	viennacl::vector<unsigned int> global_histogram_carries;
+	viennacl::vector<unsigned int> scan_context;
+
+	viennacl::ocl::kernel scan_kernel;
+	viennacl::ocl::kernel init_kernel;
+	
+	int num_groups;
+	int wg_size;
+
+	radix_select_device(int size, const viennacl::context& ctx)
+	{
+		using namespace ns_radix_select;
+		static bool init = false;
+		wg_size = 128;
+		static int num_gpu_groups = 0;
+		if (!init)
+		{
+			FILE * tmp = fopen("radix_select.c", "rb");
+			fseek(tmp, 0, SEEK_END);
+			std::vector<char> binary;
+			binary.resize(ftell(tmp));
+			rewind(tmp);
+			fread(&binary[0], binary.size(), 1, tmp);
+			fclose(tmp);
+			binary.push_back(0);
+
+			std::string program_text(&binary[0]);
+
+			viennacl::ocl::context& ocl_ctx = const_cast<viennacl::ocl::context&>(ctx.opencl_context());
+			std::cout << "Device " << ocl_ctx.current_device().name() << std::endl;
+			ocl_ctx.build_options("-cl-std=CL2.0 -D CL_VERSION_2_0");
+			ocl_ctx.add_program(program_text, std::string("radix_select_device"));
+			num_gpu_groups =  ocl_ctx.current_device().max_compute_units() * 4 + 1;
+			init = true;
+		}
+		//num_groups = std::min(num_gpu_groups, (int)(size / wg_size) + 1);
+		num_groups = 128;
+
+		src = viennacl::vector<unsigned int>(size, ctx);
+		dst = viennacl::vector<unsigned int>(size, ctx);
+		tmp = viennacl::vector<basic_type>(size, ctx);
+		global_histogram = viennacl::vector<unsigned int>((0xF + 1) * num_groups, ctx);
+		global_histogram_prefix = viennacl::vector<unsigned int>((0xF + 1) * num_groups + 1, ctx);
+		global_histogram_carries = viennacl::vector<unsigned int>(wg_size,ctx);
+		scan_context = viennacl::vector<unsigned int>(128, ctx);
+
+		init_kernel = viennacl::ocl::current_context().get_kernel("radix_select_device", "scan_digits_start");
+		scan_kernel = viennacl::ocl::current_context().get_kernel("radix_select_device", "scan_digits");
+
+		scan_kernel.local_work_size(0, wg_size);
+		scan_kernel.global_work_size(0, wg_size * num_groups);
+
+		init_kernel.local_work_size(0, wg_size);
+		init_kernel.global_work_size(0, wg_size * num_groups);
+
+
+	}
+
+	viennacl::vector<unsigned int> select(int N, viennacl::vector<basic_type>& input)
+	{
+		int selectN = N;
+
+
+		static int wg_size = 128;
+		static int num_digits = 16;
+
+		cl_uint size = src.size();
+		int shift = sizeof(basic_type) * 2 - 1;
+		int start = 0;
+		int end = input.size();
+		viennacl::ocl::enqueue(init_kernel(src, size));
+		viennacl::ocl::enqueue(
+			scan_kernel(
+			N,
+			input,
+			src,
+			tmp,
+			dst,
+			end,
+			shift,
+			global_histogram_prefix,
+			global_histogram_carries,
+			scan_context
+			)
+			);
+		return src;
+	}
+
+};
+
 
 #endif

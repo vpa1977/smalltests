@@ -361,56 +361,45 @@ static void print_vector_selected(const viennacl::vector<T>&v, const viennacl::v
 	std::cout << std::endl;
 }
 
-// 1. add printf for select
-// 2. 
-TEST(radix_sort, DISABLED_real_sort)
+
+TEST(radix_sort, DISABLED_stage3_double_sort)
 {
 	viennacl::ocl::current_context().cache_path("c:/tmp/");
-	int size = 1000;
-	viennacl::vector<double> selection(size, viennacl::ocl::current_context());
-	for (int i = 0; i < size; i++)
-		selection(i) = size - i;
-	print_vector(selection);
-	viennacl::vector<unsigned int> offsets = radix_select<double>(size, viennacl::ocl::current_context()).select(32, selection);
-	print_vector_selected(selection, offsets);
-	std::vector<unsigned int> result(offsets.size());
-	viennacl::copy(offsets, result);
-	ASSERT_EQ(offsets.size(), 32);
-	for (int i = 0; i < 32; ++i)
-	{
-		ASSERT_EQ(result[i], i+1);
-	}
+	viennacl::ocl::current_context().add_device_queue(viennacl::ocl::current_context().current_device().id());
+	int K = 128;
+	int size = 8192;
+	std::vector<double> test(size);
+	for (int i = 0; i< size; i++)
+		test[i] = size - i;
+
+	viennacl::vector<double> gpu_vec(size, viennacl::ocl::current_context());
+	viennacl::copy(test.begin(), test.end(), gpu_vec.begin());
+	radix_select_device<double> radix_device(size, viennacl::ocl::current_context());
+	viennacl::vector<unsigned int> select = radix_device.select(K, gpu_vec);
+	gpu_vec.resize(K, true);
+	print_vector(gpu_vec);
+	gpu_vec.resize(size);
+	viennacl::copy(test.begin(), test.end(), gpu_vec.begin());
+	select.resize(K, true);
+	print_vector_selected(gpu_vec, select);
+
+	printf("");
+
+
 }
 
-TEST(merge_sort, DISABLED_real_sort)
-{
-	viennacl::ocl::current_context().cache_path("c:/tmp/");
-	int size = 4096;
-	viennacl::vector<unsigned int> selection(size, viennacl::ocl::current_context());
-	viennacl::vector<unsigned int> orig_selection(size, viennacl::ocl::current_context());
-	for (int i = 0; i < size; i++)
-		orig_selection(i) = rand();
-	viennacl::copy(orig_selection, selection);
-	std::cout << "-------------------" << std::endl;
-	print_vector(selection);
-	std::cout << "-------------------" << std::endl;
-	viennacl::vector<unsigned int> offsets = radix_select<unsigned int>(size, viennacl::ocl::current_context()).select(128, selection);
-	std::cout << "-------------------" << std::endl;
-	print_vector_selected(orig_selection, offsets);
-	std::cout << "-------------------" << std::endl;
-}
 
-TEST(radix_sort, DISABLED_benchmark_double_sort)
+TEST(radix_sort, benchmark_double_sort)
 {
 	typedef double test_type;
 	viennacl::ocl::current_context().cache_path("c:/tmp/");
-
+	viennacl::ocl::current_context().add_device_queue(viennacl::ocl::current_context().current_device().id());
 	int K = 128;
 	int power = 5;
 	int retry = 30;
 	int do_not_optimize = 0;
 	std::fstream sort_benchmark("c:/master_in_progress/sort.txt");
-	for (power = 10; power < 30; ++power)
+	for (power = 9; power < 30; ++power)
 	{
 		int size = pow(2, power);
 		
@@ -429,23 +418,26 @@ TEST(radix_sort, DISABLED_benchmark_double_sort)
 		double copy_duration = duration_cast<duration<double>>(t00 - t0).count() * 1000;
 		
 		merge_sorter<test_type> merge(size, viennacl::ocl::current_context());
-		radix_select<test_type>  radix(size, viennacl::ocl::current_context());
+		radix_select<test_type> radix(size, viennacl::ocl::current_context());
+		radix_select_device<test_type> radix_device(size, viennacl::ocl::current_context());
 		bitonic_sorter<test_type> bitonic(size, viennacl::ocl::current_context());
 		if (power == 10) // warmup
 		{
 			merge.merge_sort(test_vector);
 			radix.select(K, test_vector);
+			radix_device.select(K, test_vector);
 			bitonic_sorter<test_type>(size, viennacl::ocl::current_context()).bitonic_sort(test_vector);
 		}
 		system_clock::time_point t1, t2;
 
+		viennacl::vector<unsigned int> merge_result;
 		double merge_time = 0;
 		t1 = system_clock::now();
 		for (int i = 0; i < retry; ++i)
 		{
 			viennacl::copy(cpu_vector, test_vector);
-			viennacl::vector<unsigned int> result = merge.merge_sort(test_vector);
-			int fix = result(0);
+			merge_result = merge.merge_sort(test_vector);
+			int fix = merge_result(0);
 			do_not_optimize += fix;
 		}
 		t2 = system_clock::now();
@@ -467,9 +459,49 @@ TEST(radix_sort, DISABLED_benchmark_double_sort)
 		}
 		t2 = system_clock::now();
 		radix_time += duration_cast<duration<double>>(t2 - t1).count() * 1000 - copy_duration;
-		 radix_time = radix_time / retry;
+		radix_time = radix_time / retry;
 
-		
+		double radix_time_device = 0;
+		viennacl::vector<unsigned int> radix_result;
+		t1 = system_clock::now();
+		for (int i = 0; i < retry; ++i)
+		{
+			viennacl::copy(cpu_vector, test_vector);
+
+			radix_result = radix_device.select(K, test_vector);
+			int fix = radix_result(0);
+
+			do_not_optimize += fix;
+
+		}
+		t2 = system_clock::now();
+		radix_time_device += duration_cast<duration<double>>(t2 - t1).count() * 1000 - copy_duration;
+		radix_time_device = radix_time_device / retry;
+
+		std::vector<int> merge_idx(K), radix_idx(K);
+		std::vector<double> merge_v(K), radix_v(K);
+		viennacl::copy(radix_result.begin(), radix_result.begin() + K, radix_idx.begin());
+		viennacl::copy(merge_result.begin(), merge_result.begin() + K, merge_idx.begin());
+		for (int i = 0; i < K; i++)
+		{
+			merge_v[i] = cpu_vector.at(merge_idx.at(i));
+			radix_v[i] = cpu_vector.at(radix_idx.at(i));
+		}
+		std::sort(merge_v.begin(), merge_v.end());
+		std::sort(radix_v.begin(), radix_v.end());
+		for (int i = 0; i < K; ++i)
+			if (merge_v.at(i) != radix_v.at(i))
+			{
+				std::ofstream fos("exec.log", std::ofstream::out | std::ofstream::app);
+				for (auto val : cpu_vector)
+					fos << " " << val;
+				fos << std::endl;
+				fos.close();
+				printf("bugged!!!");
+			}
+
+
+
 		double bitonic_time = 0;
 		t1 = system_clock::now();
 		for (int i = 0; i < retry; ++i)
@@ -488,7 +520,7 @@ TEST(radix_sort, DISABLED_benchmark_double_sort)
 		  bitonic_time =bitonic_time / retry;
 
 		  double cpu_sort_time = 0;
-		
+		  /*
 		if (size > 262144)
 		{
 			std::copy(cpu_vector.begin(), cpu_vector.end(), cpu_vector_test.begin());
@@ -511,11 +543,11 @@ TEST(radix_sort, DISABLED_benchmark_double_sort)
 				
 			t2 = system_clock::now();
 			cpu_sort_time = duration_cast<duration<double>>( (t2 - t1) - (t1-t0)   ).count() * 1000/retry;
-		}
+		}*/
 		 
-
-		std::cout << power << "\t" << size << "\t" << cpu_sort_time <<"\t" << bitonic_time << "\t" << merge_time << "\t" << radix_time << std::endl;
-		sort_benchmark << power << "\t" << size << "\t" << bitonic_time << "\t" << merge_time << "\t" << radix_time << std::endl;
+		  std::cout << size << "\t" << merge_time << "\t" << radix_time_device << "\t" << std::endl;
+		//std::cout << power << "\t" << size << "\t" << bitonic_time << "\t" << merge_time << "\t" << radix_time << "\t" << radix_time_device << "\t" << cpu_sort_time << std::endl;
+		sort_benchmark << power << "\t" << size << "\t" << bitonic_time << "\t" << merge_time << "\t" << radix_time << "\t" << radix_time_device << "\t" << cpu_sort_time << std::endl;
 		sort_benchmark.flush();
 	}
 	std::cout << do_not_optimize << std::endl;
@@ -839,5 +871,6 @@ TEST(select_test, DISABLED_do_select)
 	sample_select(sample_in,99, sample_out);
 
 }
+
 
 

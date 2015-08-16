@@ -11,7 +11,7 @@
 #include <chrono>
 
 
-TEST(Atomics, test_lock)
+TEST(Atomics, DISABLED_test_lock)
 {
 	viennacl::ocl::current_context().cache_path("c:/tmp/");
 	viennacl::ocl::context& g_context = viennacl::ocl::current_context();
