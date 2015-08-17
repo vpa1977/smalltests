@@ -524,8 +524,112 @@ static void print_vector_selected(const viennacl::vector<T>&v, const viennacl::v
 	fos.close();
 }
 
+TEST(radix_sort, DISABLED_short_sort)
+{
+	
+	std::vector<int> short_vec;
+	short_vec.push_back(0x2D);
+	short_vec.push_back(0x2e);
+	short_vec.push_back(0x20);
+	short_vec.push_back(0x2f);
+	short_vec.push_back(0x21);
+	short_vec.push_back(0x22);
+	short_vec.push_back(0x23);
+	short_vec.push_back(0x24);
+	short_vec.push_back(0x25);
+	short_vec.push_back(0x26);
+	short_vec.push_back(0x27);
+	short_vec.push_back(0x28);
+	short_vec.push_back(0x29);
+	short_vec.push_back(0x2a);
+	short_vec.push_back(0x2b);
+	short_vec.push_back(0x2c);
+	short_vec.push_back(0x2d);
+	short_vec.push_back(0x2e);
+	short_vec.push_back(0x20);
+	short_vec.push_back(0x2f);
+	short_vec.push_back(0x21);
+	short_vec.push_back(0x22);
+	
+	using namespace magic_hamster;
+	clearme();
 
-TEST(radix_sort, _third_stage)
+	viennacl::ocl::current_context().cache_path("c:/tmp/");
+	static bool init = false;
+	static int num_gpu_groups;
+	static int wg_size = 4;
+	static int num_digits = 16;
+
+	viennacl::backend::mem_handle opencl_carries;
+	viennacl::backend::memory_create(opencl_carries, sizeof(cl_uint) * 128, viennacl::ocl::current_context());
+
+	if (!init)
+	{
+		std::string program_text = generate_kernel<unsigned int>();
+
+
+		viennacl::ocl::context& ctx = viennacl::ocl::current_context();
+
+		std::cout << "Device " << ctx.current_device().name() << std::endl;
+		ctx.build_options("-cl-std=CL2.0 -D CL_VERSION_2_0");
+		ctx.add_program(program_text, std::string("radix_select"));
+		num_gpu_groups = ctx.current_device().max_compute_units() * 4 + 1;
+
+		init = true;
+	}
+
+	num_gpu_groups = 16;
+
+	viennacl::ocl::current_context().add_device_queue(viennacl::ocl::current_context().current_device().id());
+	viennacl::ocl::kernel scan_kernel = viennacl::ocl::current_context().get_kernel("radix_select", "scan_digits");
+	viennacl::ocl::kernel scatter_kernel = viennacl::ocl::current_context().get_kernel("radix_select", "scatter_digits");
+	viennacl::ocl::kernel scan_with_offset = viennacl::ocl::current_context().get_kernel("radix_select", "scan_with_offset");
+
+	scan_kernel.local_work_size(0, wg_size);
+	scan_kernel.global_work_size(0, wg_size * num_gpu_groups);
+
+	scan_with_offset.local_work_size(0, wg_size);
+	scan_with_offset.global_work_size(0, wg_size * num_gpu_groups);
+
+	viennacl::vector<unsigned int> global_histogram_prefix((0xF + 1) * num_gpu_groups + 1, viennacl::ocl::current_context());
+	viennacl::vector<unsigned int> secondary_histogram_prefix((0xF + 1) * num_gpu_groups + 1, viennacl::ocl::current_context());
+	viennacl::vector<unsigned int> global_histogram_carries(128, viennacl::ocl::current_context());
+
+	viennacl::vector<unsigned int> src(128 * 16 * 1, viennacl::ocl::current_context());
+	viennacl::vector<unsigned int> dst(128 * 16 * 1, viennacl::ocl::current_context());
+
+	viennacl::vector<unsigned int> scan_context(128, viennacl::ocl::current_context());
+	viennacl::vector<int> input(short_vec.size(), viennacl::ocl::current_context());
+	viennacl::vector<int> output(short_vec.size(), viennacl::ocl::current_context());
+	viennacl::copy(short_vec, input);
+	print_vector(input, "input_0", false);
+	viennacl::ocl::enqueue(
+		scan_kernel(
+			(cl_uint)short_vec.size()-2,
+			input,
+			src,
+			output,
+			dst,
+			(cl_uint)short_vec.size(),
+			0,
+			global_histogram_prefix,
+			global_histogram_carries,
+			scan_context
+			)
+		);
+	std::sort(short_vec.begin(), short_vec.end());
+	print_vector_std(short_vec, "should be ", false);
+	print_vector(input, "input_1", false);
+	print_vector(scan_context, "context_1");
+	print_vector(global_histogram_prefix, "histogram");
+	print_vector(dst, "dst");
+
+	printf("");
+
+
+}
+
+TEST(radix_sort, third_stage)
 {
 	using namespace magic_hamster;
 	clearme();
@@ -554,7 +658,7 @@ TEST(radix_sort, _third_stage)
 		init = true;
 	}
 
-	num_gpu_groups = 128;
+	num_gpu_groups = 16;
 
 	viennacl::ocl::current_context().add_device_queue(viennacl::ocl::current_context().current_device().id());
 	viennacl::ocl::kernel scan_kernel = viennacl::ocl::current_context().get_kernel("radix_select", "scan_digits");
@@ -564,8 +668,8 @@ TEST(radix_sort, _third_stage)
 	scan_kernel.local_work_size(0, wg_size);
 	scan_kernel.global_work_size(0, wg_size * num_gpu_groups);
 
-	scatter_kernel.local_work_size(0, wg_size);
-	scatter_kernel.global_work_size(0, wg_size * num_gpu_groups);
+	scan_with_offset.local_work_size(0, wg_size);
+	scan_with_offset.global_work_size(0, wg_size * num_gpu_groups);
 
 	viennacl::vector<unsigned int> global_histogram_prefix((0xF + 1) * num_gpu_groups + 1, viennacl::ocl::current_context());
 	viennacl::vector<unsigned int> secondary_histogram_prefix((0xF + 1) * num_gpu_groups + 1, viennacl::ocl::current_context());
@@ -580,6 +684,10 @@ TEST(radix_sort, _third_stage)
 	viennacl::vector<int> input(16 * max_num_digits, viennacl::ocl::current_context());
 	viennacl::vector<int> output(16 * max_num_digits, viennacl::ocl::current_context());
 
+	//
+
+
+
 	int count = 16 * max_num_digits;
 	for (int i = 0; i < max_num_digits; i++)
 		for (int j = 0; j < 16; ++j)
@@ -588,7 +696,7 @@ TEST(radix_sort, _third_stage)
 	viennacl::copy(input, test);
 
 	int shift = sizeof(int) * 2 - 1;
-	shift = 1;
+	//shift = 1;
 
 	int start = 0;
 	int end = input.size();
@@ -608,21 +716,22 @@ TEST(radix_sort, _third_stage)
 			scan_context
 			)
 			);
-		
-		/*viennacl::ocl::enqueue(
+	//print_vector(input, "raw_input_1", false);
+	//print_vector(output, "raw_dst_1", false);
+	//print_vector(dst, "raw_offset_1");
+	/*viennacl::ocl::enqueue(
 			scan_with_offset(input,
 				src,
 				output,
 				dst,
 				global_histogram_prefix,
 				global_histogram_carries,
-				scan_context)
+				scan_context,(cl_uint) scan_kernel.global_work_size(0), (cl_uint)scan_kernel.local_work_size(0))
 		);*/
-	
-
+		//print_vector(dst, "raw_offset_0");
+		//print_vector(output, "raw_dst_0", false);
 		std::vector<int> raw(input.size());
 		viennacl::copy(input, raw);
-//	print_vector_std(test, "lol_selection", false);
 		std::sort(test.begin(), test.end());
 		test.resize(N);
 		print_vector_std(test, "test_after", false);
@@ -669,11 +778,16 @@ TEST(radix_sort, _third_stage)
 				dst,
 				global_histogram_prefix,
 				global_histogram_carries,
-				scan_context
+				scan_context,
+				0,
+				0
 				)
 			);
-		print_vector(input, "result", false);
-		
+		print_vector(input, "input__", false);
+		print_vector(scan_context, "context_1");
+		print_vector(global_histogram_prefix, "histogram");
+		print_vector(output, "dst");
+
 		printf("");
 
 

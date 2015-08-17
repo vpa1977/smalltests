@@ -4,8 +4,8 @@
 inline uint extract_char(VALUE_TYPE val, uchar mask, uint shift)
 {
 //	long test = as_long(val);
-//	long res = test ^ (-(test >> 63) | 0x8000000000000000);
-//	return (res >> shift) & mask;
+	//long res = test ^ (-(test >> 63) | 0x8000000000000000);
+	//return (res >> shift) & mask;
 	return (val >> shift) & mask;
 }
 
@@ -27,6 +27,8 @@ struct scatter_context
 	uint debug_start;
 	uint debug_end;
 	uint debug_shift;
+	uint debug_old_n;
+	uint debug_hist_point;
 };
 
 __kernel void scan_digits(
@@ -62,7 +64,9 @@ __kernel void scan_with_offset
 	__global uint* out_offsets,
 	__global uint* global_histogram_prefix,
 	__global uint* carries,
-	__global uint* context
+	__global uint* context,
+	uint parent_global_size,
+	uint parent_local_size
 	)
 {
 	struct scatter_context* ctx = (struct scatter_context*)context;
@@ -70,7 +74,9 @@ __kernel void scan_with_offset
 	uint start = ctx->debug_start;
 	uint end =  ctx->debug_end;
 	int shift = ctx->shift;
-	scan_digits(N, in + start, in_offsets + start, out, out_offsets, end, shift, global_histogram_prefix, carries, context);
+	VALUE_TYPE* in_param = in + start;
+	uint* offset_param = in_offsets + start;
+	scan_digits(N, in +start, in_offsets + start, out, out_offsets, end, shift, global_histogram_prefix, carries, context);
 }
 
 
@@ -205,9 +211,6 @@ __kernel void scan_1(__global uint* X,
 		
 }
 
-
-
-
 __kernel void find_limits(
 	int N,
 	__global VALUE_TYPE* in,
@@ -253,6 +256,8 @@ __kernel void find_limits(
 	
 	if (get_global_id(0) == 0)
 	{
+		if (global_histogram_prefix[num_groups * get_local_size(0)] <= N)
+			ctx->stop = true;
 		
 		ndrange_t scan_range = ndrange_1D(parent_kernel_global_size, parent_kernel_local_size);
 		if (ctx->stop || end <= N)
@@ -260,7 +265,7 @@ __kernel void find_limits(
 			if (shift >0)
 			{
 				enqueue_kernel(get_default_queue(),
-					CLK_ENQUEUE_FLAGS_WAIT_KERNEL,
+					CLK_ENQUEUE_FLAGS_NO_WAIT,
 					scan_range,
 					^{ scan_digits(N, in, in_offsets, out, out_offsets,  end, shift - 1,  global_histogram_prefix,carries, context); }
 				); 
@@ -268,12 +273,47 @@ __kernel void find_limits(
 		}
 		else 
 		{
-			
+			clk_event_t evt_data_scattered, evt_data_copied;
 			enqueue_kernel(get_default_queue(),
-				CLK_ENQUEUE_FLAGS_WAIT_KERNEL,
+				CLK_ENQUEUE_FLAGS_NO_WAIT,
 				scan_range,
+				0, NULL, &evt_data_scattered,
 				^{ scatter_digits(N, in, in_offsets, out, out_offsets,  end, shift,   global_histogram_prefix, carries, context); }
 			);
+
+			enqueue_kernel(get_default_queue(),
+				CLK_ENQUEUE_FLAGS_NO_WAIT,
+				scan_range,
+				1, &evt_data_scattered, &evt_data_copied,
+				^{ for (int idx = get_global_id(0); idx < end; idx += get_global_size(0))
+					{
+						in[idx] = out[idx];
+						in_offsets[idx] = out_offsets[idx];
+					}
+			});
+
+			int newN = N - (ctx->hist_min);
+			uint start = ctx->hist_min;
+			uint new_end = min(end, ctx->hist_max);
+			new_end = new_end - start;
+			__global VALUE_TYPE* new_in = in + start;
+			__global uint* new_offsets = in_offsets + start;
+			ctx->debug_n = newN;
+			ctx->debug_start = start;
+			ctx->debug_end = new_end;
+			ctx->shift = shift - 1;
+
+			/*enqueue_kernel(get_default_queue(),
+				CLK_ENQUEUE_FLAGS_NO_WAIT,
+				scan_range,
+				1, &evt_data_copied, NULL,
+				^{ scan_digits(newN, new_in, new_offsets, out, out_offsets,  new_end, shift - 1,  global_histogram_prefix,carries, context); }
+			);*/
+
+			
+			release_event(evt_data_scattered);
+			release_event(evt_data_copied);
+
 		}
 	}
 }
@@ -297,7 +337,7 @@ __kernel void scatter_digits(
 {
 //	if (get_global_id(0) == 0 ) context[20 + shift] = 1;
 
-	__local uint reduce_buffer[WG_SIZE * 0x10];
+	__local uint reduce_buffer[WG_SIZE][0x10];
 	struct scatter_context* ctx = (struct scatter_context*)context;
 
 	uint lid = get_local_id(0);
@@ -307,109 +347,53 @@ __kernel void scatter_digits(
 
 	__local uint prefix[0x10];
 //	__local uint prefix_next[0x10];
-	if (lid < 0x10)
+	if (get_local_id(0) == 0)
 	{
-		prefix[lid] = global_histogram_prefix[lid * get_num_groups(0) + get_group_id(0)];
-//		prefix_next[lid] = global_histogram_prefix[lid * get_num_groups(0) + get_group_id(0) + 1];
+
+		for (int lid_idx = 0; lid_idx < 0x10; lid_idx += 1)
+			prefix[lid_idx] = global_histogram_prefix[lid_idx * get_num_groups(0) + get_group_id(0)];
 	}
 	barrier(CLK_LOCAL_MEM_FENCE);
-	
+	uint loop_step = 0;
 	// loop should be aligned to the workgroup size
-	for (int id = get_global_id(0); id < loop_end; id += get_global_size(0))
+	for (int id = get_global_id(0); id < loop_end; id += get_global_size(0), loop_step++)
 	{
 		// build scans for current workgroup/iteration
 		uint cur_digit = select((uint)0xF, extract_char(in[id], MASK, MASK_SIZE * shift), id  < end);
+
 		for (uint digit = 0; digit <= 0xF; ++digit)
-			reduce_buffer[lid + get_local_size(0)*digit] = select(0, 1, digit == cur_digit); // reset scans
+		{
+			reduce_buffer[digit][lid] = select(0, 1, digit == cur_digit); // reset scans
+			
+		}
 		barrier(CLK_LOCAL_MEM_FENCE);
+
 		for (uint digit =  ctx->min_digit; digit <= ctx->max_digit; ++digit)
 		{
 			//if (prefix[digit] != prefix_next[digit])
 			{
-				workgroup_scan(&reduce_buffer[get_local_size(0)*digit]);
+				workgroup_scan(&reduce_buffer[digit][0]);
 			}
+			//out_offsets[get_local_size(0) * 0x10 * loop_step + get_local_size(0)*digit + lid] = reduce_buffer[digit][lid];
 		}
 		barrier(CLK_LOCAL_MEM_FENCE);
 		if (id  < end && cur_digit >= ctx->min_digit && cur_digit <= ctx->max_digit)
 		{
-			uint scatter_pos = prefix[cur_digit] + reduce_buffer[get_local_size(0) *cur_digit + lid] - 1;
+			uint scatter_pos = prefix[cur_digit] + reduce_buffer[cur_digit][lid] - 1;
 			out[scatter_pos ] =  in[id];
 			out_offsets[scatter_pos] = in_offsets[id];
+			//out_offsets[id] = scatter_pos;
 		}
 
-		if (lid < 0x10) // pad global histogram with reduce results
-			prefix[lid] += reduce_buffer[get_local_size(0)*lid + get_local_size(0) - 1];
-		barrier(CLK_LOCAL_MEM_FENCE);
+		if (get_local_id(0) == 0)
+		{
+			for (int lid_idx = 0; lid_idx < 0x10; lid_idx += 1) // pad global histogram with reduce results
+				prefix[lid_idx] += reduce_buffer[lid_idx][get_local_size(0) - 1];
+		}
+		barrier(CLK_GLOBAL_MEM_FENCE);
 	}
 	
-	if (get_global_id(0) == 0 )
-	{
 	
-		ndrange_t scan_range = ndrange_1D(get_global_size(0), get_local_size(0));
-
-		if (shift > 0 && ctx->hist_max > N)
-		{
-			int last_value = end;
-/*			clk_event_t evt_data_copied;
-			enqueue_kernel(get_default_queue(),
-				CLK_ENQUEUE_FLAGS_WAIT_KERNEL,
-				scan_range,
-				0, NULL, &evt_data_copied,
-				^{ for (int idx = get_global_id(0); idx < last_value; idx += get_global_size(0)) {
-				in[idx] = out[idx];
-				in_offsets[idx] = out_offsets[idx];
-			}
-			}
-			);
-			*/
-			int newN = N - (ctx->hist_min);
-			uint start = ctx->hist_min;
-			uint new_end = min(end, ctx->hist_max);
-			new_end = new_end - start;
-			__global VALUE_TYPE* new_in = in + start;
-			__global uint* new_offsets = in_offsets + start;
-			ctx->debug_n = newN;
-			ctx->debug_start = start;
-			ctx->debug_end = new_end;
-			ctx->shift = shift - 1;
-			/*barrier(CLK_GLOBAL_MEM_FENCE);
-			enqueue_kernel(get_default_queue(),
-				CLK_ENQUEUE_FLAGS_WAIT_KERNEL,
-				scan_range,
-				^{ scan_with_offset(in, in_offsets, out, out_offsets,   global_histogram_prefix, carries, context); }
-			);*/
-			
-			enqueue_kernel(get_default_queue(),
-				CLK_ENQUEUE_FLAGS_WAIT_KERNEL,
-				scan_range,
-				//1, &evt_data_copied, NULL,
-				^{ 
-					for (int idx = get_global_id(0); idx < last_value; idx += get_global_size(0)) {
-						in[idx] = out[idx];
-						in_offsets[idx] = out_offsets[idx];
-					}
-					barrier(CLK_GLOBAL_MEM_FENCE); // commit current workgroup
-					scan_digits(newN, new_in, new_offsets, out, out_offsets,  new_end, shift - 1,  global_histogram_prefix,carries, context); 
-			
-				}
-			);
-			//release_event(evt_data_copied);
-		}
-		else
-		{
-			enqueue_kernel(get_default_queue(),
-				CLK_ENQUEUE_FLAGS_WAIT_KERNEL,
-				scan_range,
-				^{ for (int idx = get_global_id(0); idx < end; idx += get_global_size(0)) {
-				in[idx] = out[idx];
-				in_offsets[idx] = out_offsets[idx];
-			}
-			}
-			);
-		}
-		
-
-	}
 }
 
 
@@ -446,10 +430,15 @@ __kernel void scan_digits(
 		if (lid == 0)
 			global_histogram_prefix[get_group_id(0) + digit * get_num_groups(0)] = reduce_buffer[0];
 	}
+	
+		
+
+	barrier(CLK_GLOBAL_MEM_FENCE);
 	if (get_global_id(0) == 0)
 	{
-		int histogram_size = get_num_groups(0) *0x10;
-		clk_event_t evt_histogram_ready, evt_scan_ready, evt_carry_ready;
+		global_histogram_prefix[0x10 * get_num_groups(0)] = reduce_buffer[get_local_size(0) - 1];
+		int histogram_size = get_num_groups(0) *0x10+1;
+		clk_event_t evt_histogram_ready, evt_scan_ready, evt_carry_ready, evt_ready_relaunch;
 		ndrange_t sum_range = ndrange_1D(SCAN_GLOBAL_SIZE, SCAN_WG_SIZE);
 		ndrange_t scatter_range = ndrange_1D(get_global_size(0), get_local_size(0));
 		ndrange_t carries_range = ndrange_1D(SCAN_WG_SIZE, SCAN_WG_SIZE);
@@ -474,19 +463,27 @@ __kernel void scan_digits(
 			CLK_ENQUEUE_FLAGS_NO_WAIT,
 			sum_range,
 			1, &evt_carry_ready, &evt_histogram_ready,
-			^{scan_3(global_histogram_prefix, 0, 1, histogram_size+1, carries); }
+			^{scan_3(global_histogram_prefix, 0, 1, histogram_size, carries); }
 		);
 		
 		enqueue_kernel(get_default_queue(),
 			CLK_ENQUEUE_FLAGS_NO_WAIT,
 			limits_range,
-			1, &evt_histogram_ready,NULL,
+			1, &evt_histogram_ready,&evt_ready_relaunch,
 			^{ find_limits(N, in, in_offsets, out, out_offsets, end, shift,   global_histogram_prefix, carries, context, parent_global_size, parent_local_size); }
 		);
+
+		/*enqueue_kernel(get_default_queue(),
+			CLK_ENQUEUE_FLAGS_NO_WAIT,
+			ndrange_1D(1),
+			1, &evt_ready_relaunch, NULL,
+			^{ scan_with_offset(in, in_offsets, out, out_offsets, global_histogram_prefix, carries, context, parent_global_size, parent_local_size); }
+		);*/
 
 		release_event(evt_scan_ready);
 		release_event(evt_carry_ready);
 		release_event(evt_histogram_ready);
+		release_event(evt_ready_relaunch);
 	}
 
 }

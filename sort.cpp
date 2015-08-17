@@ -386,7 +386,7 @@ TEST(radix_sort, DISABLED_stage3_double_sort)
 		radix_select_device<double> radix_device(size, viennacl::ocl::current_context());
 		viennacl::vector<unsigned int> select = radix_device.select(K, gpu_vec);
 		gpu_vec.resize(K, true);
-		print_vector(gpu_vec);
+		//print_vector(gpu_vec);
 		gpu_vec.resize(size);
 		std::vector<double> value_sort(K), value_from_select(K);
 		viennacl::copy(gpu_vec.begin(), gpu_vec.begin() + K, value_sort.begin());
